@@ -1,243 +1,164 @@
 # fea_input_writer.py
-# Generates CalculiX input files (.inp) from mesh and boundary conditions
-#
-# What is a CalculiX input file?
-# It's a text file that tells CalculiX:
-#   - What nodes and elements exist (the mesh)
-#   - What material properties to use
-#   - Where the part is fixed (boundary conditions)
-#   - What forces are applied
-#   - What type of analysis to run
-
 import gmsh
 import os
 
 def generate_calculix_input(step_file_path, material, boundary_conditions, output_dir, mesh_size=5.0):
-    """
-    Full pipeline: STEP → Mesh → CalculiX input file
-    
-    Parameters:
-        step_file_path     : path to .step file
-        material           : dict with material properties
-        boundary_conditions: dict with loads and constraints
-        output_dir         : where to save output files
-        mesh_size          : mesh fineness in mm
-    
-    Returns:
-        path to the generated .inp file
-    """
     
     print("\n" + "="*50)
     print("  FEA INPUT GENERATOR")
     print("="*50)
-    
-    # ── Step 1: Generate mesh using GMSH ─────────────
+
+    # ── Step 1: Mesh ─────────────────────────────────
     print("\n[1/4] Generating mesh...")
-    
+
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 1)
     gmsh.model.add("fea_model")
     gmsh.model.occ.importShapes(step_file_path)
     gmsh.model.occ.synchronize()
-    
+
+    gmsh.option.setNumber("Mesh.Algorithm3D", 4)       # Frontal-Delaunay
     gmsh.option.setNumber("Mesh.MeshSizeMax", mesh_size)
-    gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size * 0.5)
-    gmsh.option.setNumber("Mesh.Algorithm3D", 1)
-    gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 0)
-    
-    # Generate second-order mesh (better accuracy for FEA)
-    # Second order = each element has extra midpoint nodes
-    # More accurate results, slightly slower
+    gmsh.option.setNumber("Mesh.MeshSizeMin", mesh_size * 0.8)
+    gmsh.option.setNumber("Mesh.Optimize", 1)
+    gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+
     gmsh.model.mesh.generate(3)
-    gmsh.model.mesh.setOrder(2)
-    
-    # ── Step 2: Extract nodes and elements ───────────
+    gmsh.model.mesh.setOrder(1)                        # C3D4 = first order
+    gmsh.model.mesh.optimize("Netgen")
+
+    # ── Step 2: Node ve element bilgilerini al ────────
     print("[2/4] Extracting nodes and elements...")
-    
-    # Get all nodes
+
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    
-    # node_coords is a flat list: [x1,y1,z1, x2,y2,z2, ...]
-    # We reshape it into pairs: [(x1,y1,z1), (x2,y2,z2), ...]
+
     nodes = {}
     for i, tag in enumerate(node_tags):
         x = node_coords[i*3]
         y = node_coords[i*3 + 1]
         z = node_coords[i*3 + 2]
         nodes[int(tag)] = (x, y, z)
-    
-    # Get 3D elements only (tetrahedra = 4-node or 10-node pyramids)
-    # Element type 11 = 10-node tetrahedron (second order)
-    # Element type 4  = 4-node tetrahedron (first order)
+
+    # Sadece 3D tetrahedra al (type 4 = C3D4)
     elements = {}
-    elem_types, elem_tags, elem_nodes = gmsh.model.mesh.getElements(dim=3)
-    
     elem_counter = 1
+    elem_types, elem_tags, elem_nodes = gmsh.model.mesh.getElements(dim=3)
+
     for etype, etags, enodes in zip(elem_types, elem_tags, elem_nodes):
         nodes_per_elem = len(enodes) // len(etags)
+        if nodes_per_elem != 4:
+            print(f"    UYARI: {nodes_per_elem}-node element bulundu, atlanıyor.")
+            continue
         for i, tag in enumerate(etags):
-            start = i * nodes_per_elem
-            conn  = [int(n) for n in enodes[start:start+nodes_per_elem]]
+            start = i * 4
+            conn  = [int(n) for n in enodes[start:start+4]]
             elements[elem_counter] = conn
             elem_counter += 1
-    
-    # Find bottom face nodes (for fixed support)
-    # We find nodes with minimum Z coordinate
-    all_z = [coords[2] for coords in nodes.values()]
-    min_z = min(all_z)
-    tolerance = mesh_size * 0.1
-    
-    bottom_nodes = [
-        tag for tag, coords in nodes.items()
-        if abs(coords[2] - min_z) < tolerance
-    ]
-    
-    # Find top face nodes (for applying force)
-    max_z = max(all_z)
-    top_nodes = [
-        tag for tag, coords in nodes.items()
-        if abs(coords[2] - max_z) < tolerance
-    ]
-    
-    print(f"    Nodes    : {len(nodes):,}")
-    print(f"    Elements : {len(elements):,}")
-    print(f"    Fixed nodes (bottom): {len(bottom_nodes)}")
-    print(f"    Loaded nodes (top)  : {len(top_nodes)}")
-    
+
+    # Bottom/top node'ları bul
+    all_z     = [c[2] for c in nodes.values()]
+    min_z     = min(all_z)
+    max_z     = max(all_z)
+    tol       = mesh_size * 0.1
+
+    bottom_nodes = [t for t, c in nodes.items() if abs(c[2] - min_z) < tol]
+    top_nodes    = [t for t, c in nodes.items() if abs(c[2] - max_z) < tol]
+
+    print(f"    Nodes          : {len(nodes):,}")
+    print(f"    Elements (C3D4): {len(elements):,}")
+    print(f"    Fixed (bottom) : {len(bottom_nodes)}")
+    print(f"    Loaded (top)   : {len(top_nodes)}")
+
+    if len(elements) == 0:
+        gmsh.finalize()
+        raise RuntimeError("Hiç C3D4 element bulunamadı! Mesh oluşturulamadı.")
+
     gmsh.finalize()
-    
-    # ── Step 3: Write CalculiX input file ────────────
+
+    # ── Step 3: .inp dosyasını yaz ───────────────────
     print("[3/4] Writing CalculiX input file...")
-    
+
     inp_path = os.path.join(output_dir, "analysis.inp")
-    
-    with open(inp_path, 'w') as f:
-        
-        # Header
+
+    with open(inp_path, 'w', newline='\n') as f:
+
         f.write("** CalculiX Input File\n")
-        f.write("** Generated by FEA Platform\n")
-        f.write("** Analysis type: Linear Static\n\n")
-        
-        # ── NODE SECTION ──────────────────────────────
-        # List every node with its X, Y, Z coordinates
+        f.write("** Element type: C3D4 (4-node tetrahedron, first order)\n\n")
+
+        # NODES
         f.write("*NODE, NSET=ALL_NODES\n")
         for tag, (x, y, z) in nodes.items():
             f.write(f"{tag}, {x:.6f}, {y:.6f}, {z:.6f}\n")
-        
-        # ── ELEMENT SECTION ───────────────────────────
-        # List every element with its connected nodes
-        # C3D10 = 10-node tetrahedral element (CalculiX name)
-        f.write("\n*ELEMENT, TYPE=C3D10, ELSET=ALL_ELEMENTS\n")
+
+        # ELEMENTS — C3D4 !
+        f.write("\n*ELEMENT, TYPE=C3D4, ELSET=ALL_ELEMENTS\n")
         for tag, conn in elements.items():
-            node_str = ", ".join(str(n) for n in conn)
-            f.write(f"{tag}, {node_str}\n")
-        
-        # ── NODE SETS ─────────────────────────────────
-        # Node sets = named groups of nodes
-        # We use them to apply boundary conditions
-        
-        # Fixed support nodes (bottom face)
+            f.write(f"{tag}, {conn[0]}, {conn[1]}, {conn[2]}, {conn[3]}\n")
+
+        # FIXED NODE SET
         f.write("\n*NSET, NSET=FIXED_NODES\n")
         for i, n in enumerate(bottom_nodes):
             f.write(str(n))
-            if (i+1) % 10 == 0:
-                f.write("\n")  # max 10 per line
-            else:
-                f.write(", ")
+            f.write("\n" if (i+1) % 10 == 0 else ", ")
         f.write("\n")
-        
-        # Force application nodes (top face)
+
+        # LOAD NODE SET
         f.write("\n*NSET, NSET=LOAD_NODES\n")
         for i, n in enumerate(top_nodes):
             f.write(str(n))
-            if (i+1) % 10 == 0:
-                f.write("\n")
-            else:
-                f.write(", ")
+            f.write("\n" if (i+1) % 10 == 0 else ", ")
         f.write("\n")
-        
-        # ── MATERIAL DEFINITION ───────────────────────
-        # Tell CalculiX what the part is made of
+
+        # MATERIAL
         f.write(f"\n*MATERIAL, NAME={material['name']}\n")
-        
-        # Elastic properties: Young's modulus and Poisson's ratio
-        # Units: MPa (N/mm²) for modulus
         f.write("*ELASTIC\n")
         f.write(f"{material['youngs_modulus']}, {material['poisson_ratio']}\n")
-        
-        # Density (kg/mm³) - needed for gravity loads
         f.write("*DENSITY\n")
         f.write(f"{material['density']}\n")
-        
-        # ── SECTION ASSIGNMENT ────────────────────────
-        # Assign material to elements
-        f.write(f"\n*SOLID SECTION, ELSET=ALL_ELEMENTS, MATERIAL={material['name']}\n")
-        f.write("\n")
-        
-        # ── ANALYSIS STEP ─────────────────────────────
-        # Define what type of analysis to run
+
+        # SECTION
+        f.write(f"\n*SOLID SECTION, ELSET=ALL_ELEMENTS, MATERIAL={material['name']}\n\n")
+
+        # STEP
         f.write("*STEP\n")
-        f.write("*STATIC\n\n")  # Linear static analysis
-        
-        # ── BOUNDARY CONDITIONS ───────────────────────
-        # Fix the bottom face: no movement in X, Y, or Z
-        # Format: node_set, first_dof, last_dof, value
-        # DOF 1=X, 2=Y, 3=Z, 4=rotation_X, 5=rotation_Y, 6=rotation_Z
-        f.write("** Fixed support - bottom face cannot move\n")
+        f.write("*STATIC\n\n")
+
+        # BOUNDARY CONDITIONS
         f.write("*BOUNDARY\n")
         f.write("FIXED_NODES, 1, 3, 0.0\n\n")
-        
-        # ── APPLIED FORCE ─────────────────────────────
-        # Apply force to top face nodes
-        # Total force is distributed across all top nodes
-        force_total = boundary_conditions['force_z']  # Newtons
-        force_per_node = force_total / len(top_nodes)  # Distribute evenly
-        
-        f.write(f"** Applied force: {force_total} N in Z direction\n")
-        f.write(f"** Distributed across {len(top_nodes)} nodes\n")
+
+        # FORCE
+        force_total    = boundary_conditions['force_z']
+        force_per_node = force_total / len(top_nodes)
+        f.write(f"** Total force: {force_total} N across {len(top_nodes)} nodes\n")
         f.write("*CLOAD\n")
         for n in top_nodes:
-            # Format: node, DOF, force_value
             f.write(f"{n}, 3, {force_per_node:.6f}\n")
-        
-        # ── OUTPUT REQUESTS ───────────────────────────
-        # Tell CalculiX what results to save
-        f.write("\n** Output requests\n")
-        f.write("*NODE FILE\n")
-        f.write("U\n")          # U = displacements (how much each node moved)
-        f.write("*EL FILE\n")
-        f.write("S\n")          # S = stress tensor
-        f.write("E\n")          # E = strain tensor
-        
+
+        # OUTPUT
+        f.write("\n*NODE FILE\nU\n")
+        f.write("*EL FILE\nS\nE\n")
         f.write("\n*END STEP\n")
-    
-    print(f"    Saved to: {inp_path}")
-    
+
+    print(f"    Saved: {inp_path}")
     return inp_path, len(nodes), len(elements)
 
 
 if __name__ == "__main__":
-    
-    # ── Test configuration ────────────────────────────
-    
-    # Material: Structural Steel
+
     steel = {
         "name"           : "STEEL",
-        "youngs_modulus" : 210000,   # MPa (210 GPa)
+        "youngs_modulus" : 210000,
         "poisson_ratio"  : 0.3,
-        "density"        : 7.85e-9,  # kg/mm³
-        "yield_strength" : 235       # MPa (for post-processing)
+        "density"        : 7.85e-9,
+        "yield_strength" : 235
     }
-    
-    # Boundary conditions
-    # Force: 10,000 N pushing down (negative Z = downward)
-    loads = {
-        "force_z" : -10000   # Newtons, negative = downward
-    }
-    
+
+    loads = {"force_z": -10000}
+
     step_file  = r"C:\Users\aysal\Desktop\AI_Component_Analyzer\test_part.step"
     output_dir = r"C:\Users\aysal\Desktop\AI_Component_Analyzer"
-    
+
     inp_file, n_nodes, n_elems = generate_calculix_input(
         step_file_path      = step_file,
         material            = steel,
@@ -245,7 +166,6 @@ if __name__ == "__main__":
         output_dir          = output_dir,
         mesh_size           = 5.0
     )
-    
-    print(f"\n✓ Input file ready: {inp_file}")
+
+    print(f"\n✓ Hazır: {inp_file}")
     print(f"✓ Nodes: {n_nodes:,}  |  Elements: {n_elems:,}")
-    print("\nNext step: run CalculiX on this file")

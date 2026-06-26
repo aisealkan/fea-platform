@@ -9,21 +9,9 @@ import subprocess
 import os
 import re
 
-# Path to CalculiX executable
-CALCULIX_PATH = r"C:\CalculiX\ccx.exe"
+CALCULIX_PATH = r"C:\Users\aysal\Downloads\CalculiX-2.20.0-win-x64\CalculiX-2.20.0-win-x64\bin\ccx.exe"
 
 def run_analysis(inp_file_path):
-    """
-    Runs CalculiX on the input file.
-    
-    CalculiX is called from command line like:
-        ccx.exe -i analysis
-    (note: no .inp extension, CalculiX adds it automatically)
-    """
-    
-    print("\n" + "="*50)
-    print("  RUNNING FEA ANALYSIS")
-    print("="*50)
     
     if not os.path.exists(inp_file_path):
         print(f"ERROR: Input file not found: {inp_file_path}")
@@ -33,32 +21,36 @@ def run_analysis(inp_file_path):
         print(f"ERROR: CalculiX not found at: {CALCULIX_PATH}")
         return False
     
-    # Job name = filename without extension
-    job_name    = os.path.splitext(inp_file_path)[0]
     working_dir = os.path.dirname(inp_file_path)
     
     print(f"Input file : {inp_file_path}")
-    print(f"Job name   : {job_name}")
     print(f"Running CalculiX...")
     
-    # Run CalculiX as a subprocess
-    # subprocess = running another program from within Python
     result = subprocess.run(
-        [CALCULIX_PATH, "-i", job_name],
-        cwd     = working_dir,
-        capture_output = True,
-        text    = True
+        [CALCULIX_PATH, "-i", "analysis"],
+        cwd=working_dir,
+        capture_output=True,   # ← DÜZELTME: stdout/stderr yakala
+        text=True
     )
     
-    # Check if it succeeded
+    # CalculiX çıktısını göster
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print("STDERR:", result.stderr)
+    
     if result.returncode != 0:
-        print("ERROR: CalculiX failed.")
-        print(result.stderr)
+        print("ERROR: CalculiX failed with return code:", result.returncode)
+        return False
+    
+    # .frd dosyası oluştu mu kontrol et
+    frd_path = os.path.join(working_dir, "analysis.frd")
+    if not os.path.exists(frd_path):
+        print("ERROR: analysis.frd oluşmadı! CalculiX gizli hata verdi.")
         return False
     
     print("✓ CalculiX completed successfully.")
     return True
-
 
 def read_frd_results(frd_file_path):
     """
@@ -219,7 +211,7 @@ def print_results(results, material_yield=235.0):
 
 if __name__ == "__main__":
     
-    base_dir = r"C:\Users\aysal\Desktop\AI_Component_Analyzer"
+    base_dir = r"C:\Users\aysal\Desktop\AI_Component_Analyzer\backend\solver"
     inp_file = os.path.join(base_dir, "analysis.inp")
     frd_file = os.path.join(base_dir, "analysis.frd")
     
