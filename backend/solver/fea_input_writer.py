@@ -168,4 +168,3 @@ if __name__ == "__main__":
     )
 
     print(f"\n✓ Hazır: {inp_file}")
-    print(f"✓ Nodes: {n_nodes:,}  |  Elements: {n_elems:,}")
